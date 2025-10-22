@@ -674,6 +674,7 @@ export class FireproofBackend {
                   <!DOCTYPE html>
                   <html>
                   <head>
+                    <meta charset="UTF-8">
                     <title>Fireproof Authentication</title>
                     <style>
                       body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
