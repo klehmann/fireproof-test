@@ -15,8 +15,9 @@
   "license": "ISC",
   "description": "Fireproof Todo App with Hono Server and React Client",
   "dependencies": {
-    "@fireproof/core": "^0.23.15",
     "@adviser/cement": "^0.4.51",
+    "@fireproof/core": "^0.23.15",
+    "@fireproof/core-gateways-cloud": "^0.23.15",
     "@hono/node-server": "^1.19.5",
     "@hono/node-ws": "^1.2.0",
     "hono": "^4.10.2",

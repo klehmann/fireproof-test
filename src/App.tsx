@@ -1,8 +1,9 @@
 import './App.css'
-import { useFireproof } from 'use-fireproof'
-import { connectToLocalServer } from "./connect/index";
+import { registerStoreProtocol, SuperThis, toCloud, useFireproof } from 'use-fireproof'
 import { useEffect, useState } from 'react';
 import { config } from './config';
+import { URI } from '@adviser/cement';
+import { CloudGateway } from '@fireproof/core-gateways-cloud';
 
 interface Todo {
   _id?: string;
@@ -13,10 +14,37 @@ interface Todo {
 }
 
 function App() {
-  const { database, useLiveQuery, useAllDocs, useDocument } = useFireproof("fireproof-todo-app", 
-    connectToLocalServer(config.getServerUrl())
-  )
-  
+  URI.protocolHasHostpart("fpcloud");
+  registerStoreProtocol({
+    protocol: "fpcloud",
+    defaultURI() {
+      return URI.from("fpcloud://localhost:3001/");
+    },
+    serdegateway: async (sthis: SuperThis) => {
+      return new CloudGateway(sthis);
+    },
+  });
+
+  // Also register HTTP protocol handler for our local server
+  URI.protocolHasHostpart("http");
+  registerStoreProtocol({
+    protocol: "http",
+    defaultURI() {
+      return URI.from("http://localhost:3001/");
+    },
+    serdegateway: async (sthis: SuperThis) => {
+      return new CloudGateway(sthis);
+    },
+  });
+
+  const { database, useLiveQuery, useAllDocs, useDocument } = useFireproof("fireproof-todo-app", {
+    attach: toCloud({
+      dashboardURI: "http://localhost:3001/fp/cloud/api/token",
+      tokenApiURI: "http://localhost:3001/api",
+      urls: { base: "http://localhost:3001?protocol=http&forceHttp=true" },
+    }),
+  });
+
   const allDocs = useAllDocs();
   console.log('allDocs:', allDocs);
 
@@ -183,7 +211,7 @@ function App() {
           <h4>Debug Info</h4>
           <p><strong>Database:</strong> {database ? 'Connected' : 'Not connected'}</p>
           <p><strong>Server URL:</strong> {config.getServerUrl()}</p>
-          <p><strong>Total Documents:</strong> {allDocs.length}</p>
+          <p><strong>Total Documents:</strong> {allDocs.docs.length}</p>
           <p><strong>Todo Count:</strong> {todos.length}</p>
         </div>
       </div>
