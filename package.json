@@ -1,0 +1,38 @@
+{
+  "name": "fireproof-test",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "vite",
+    "dev:server": "nodemon --exec \"node --import tsx\" src/server/index.ts",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "start:server": "node --import tsx src/server/index.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "Fireproof Todo App with Hono Server and React Client",
+  "dependencies": {
+    "@fireproof/core": "^0.23.15",
+    "@adviser/cement": "^0.4.51",
+    "@hono/node-server": "^1.19.5",
+    "@hono/node-ws": "^1.2.0",
+    "hono": "^4.10.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "use-fireproof": "^0.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.0.1",
+    "tsx": "^4.7.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.1.7"
+  }
+}
