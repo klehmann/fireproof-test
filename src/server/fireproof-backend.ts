@@ -19,8 +19,143 @@ import { HttpHeader } from '@adviser/cement';
 import { exception2Result, top_uint8 } from '@adviser/cement';
 import { SignJWT } from 'jose';
 import { generateKeyPair } from 'jose/key/generate/keypair';
+import { promises as fs, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
 
-// Simple in-memory storage for demo purposes
+// Persistent file-based storage
+class PersistentStorage {
+  private dataDir: string;
+  private carFilesDir: string;
+  private metaStoreFile: string;
+
+  constructor(dataDir: string = './data') {
+    this.dataDir = dataDir;
+    this.carFilesDir = join(dataDir, 'car-files');
+    this.metaStoreFile = join(dataDir, 'meta-store.json');
+  }
+
+  async initialize(): Promise<void> {
+    try {
+      await fs.mkdir(this.dataDir, { recursive: true });
+      await fs.mkdir(this.carFilesDir, { recursive: true });
+    } catch (error) {
+      console.error('Failed to create data directories:', error);
+    }
+  }
+
+  async saveCarFile(key: string, data: Uint8Array): Promise<void> {
+    const filePath = join(this.carFilesDir, `${key}.car`);
+    await fs.writeFile(filePath, data);
+  }
+
+  async loadCarFile(key: string): Promise<Uint8Array | null> {
+    try {
+      const filePath = join(this.carFilesDir, `${key}.car`);
+      const data = await fs.readFile(filePath);
+      return new Uint8Array(data);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async deleteCarFile(key: string): Promise<void> {
+    try {
+      const filePath = join(this.carFilesDir, `${key}.car`);
+      await fs.unlink(filePath);
+    } catch (error) {
+      // File doesn't exist, that's fine
+    }
+  }
+
+  async saveMetaStore(metaStore: Map<string, { data: string; parents?: string[] }>): Promise<void> {
+    const data = Object.fromEntries(metaStore);
+    await fs.writeFile(this.metaStoreFile, JSON.stringify(data, null, 2));
+  }
+
+  async loadMetaStore(): Promise<Map<string, { data: string; parents?: string[] }>> {
+    try {
+      const data = await fs.readFile(this.metaStoreFile, 'utf-8');
+      const parsed = JSON.parse(data);
+      return new Map(Object.entries(parsed));
+    } catch (error) {
+      return new Map();
+    }
+  }
+
+  // Additional methods for CloudGateway compatibility
+  getMetaStore(): Record<string, { data: string; parents?: string[]; cid?: string }> {
+    // This is a synchronous version for the CloudGateway compatibility
+    try {
+      const data = readFileSync(this.metaStoreFile, 'utf-8');
+      return JSON.parse(data);
+    } catch (error) {
+      return {};
+    }
+  }
+
+  getCarFile(cid: string): Uint8Array | null {
+    try {
+      const filePath = join(this.carFilesDir, `${cid}.car`);
+      const data = readFileSync(filePath);
+      return new Uint8Array(data);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  putMeta(key: string, data: any): void {
+    try {
+      const metaStore = this.getMetaStore();
+      metaStore[key] = data;
+      writeFileSync(this.metaStoreFile, JSON.stringify(metaStore, null, 2));
+    } catch (error) {
+      console.error('Failed to save meta:', error);
+    }
+  }
+
+  putCarFile(cid: string, data: any): void {
+    try {
+      const filePath = join(this.carFilesDir, `${cid}.car`);
+      writeFileSync(filePath, JSON.stringify(data));
+    } catch (error) {
+      console.error('Failed to save CAR file:', error);
+    }
+  }
+
+  // Key management methods for cross-browser sharing
+  getKeyStore(): Record<string, any> {
+    try {
+      const keyStoreFile = join(this.dataDir, 'key-store.json');
+      const data = readFileSync(keyStoreFile, 'utf-8');
+      return JSON.parse(data);
+    } catch (error) {
+      return {};
+    }
+  }
+
+  putKeyStore(keyStore: Record<string, any>): void {
+    try {
+      const keyStoreFile = join(this.dataDir, 'key-store.json');
+      writeFileSync(keyStoreFile, JSON.stringify(keyStore, null, 2));
+    } catch (error) {
+      console.error('Failed to save key store:', error);
+    }
+  }
+
+  storeKeysForToken(token: string, keys: any): void {
+    const keyStore = this.getKeyStore();
+    keyStore[token] = keys;
+    this.putKeyStore(keyStore);
+  }
+
+  getKeysForToken(token: string): any {
+    const keyStore = this.getKeyStore();
+    return keyStore[token] || null;
+  }
+}
+
+// Persistent storage instance
+const storage = new PersistentStorage();
 const carFiles = new Map<string, Uint8Array>();
 const metaStore = new Map<string, { data: string; parents?: string[] }>();
 
@@ -65,12 +200,14 @@ class SimpleMsgDispatcher {
   private logger: any;
   private ende: any;
   private sthis: SuperThis;
+  private storage: PersistentStorage;
 
-  constructor(wsRoom: SimpleWSRoom, logger: any, ende: any, sthis: SuperThis) {
+  constructor(wsRoom: SimpleWSRoom, logger: any, ende: any, sthis: SuperThis, storage: PersistentStorage) {
     this.wsRoom = wsRoom;
     this.logger = logger;
     this.ende = ende;
     this.sthis = sthis;
+    this.storage = storage;
   }
 
   async dispatch(ctx: any, msg: MsgBase): Promise<Response> {
@@ -168,7 +305,7 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private handlePutMeta(_ctx: any, msg: any): Response {
+  private async handlePutMeta(_ctx: any, msg: any): Promise<Response> {
     this.logger.Info().Any('putMetaMsg', msg).Msg('Handling reqPutMeta');
     
     const { meta } = msg;
@@ -181,6 +318,14 @@ class SimpleMsgDispatcher {
           parents: metaEntry.parents
         });
         this.logger.Debug().Str('key', key).Msg('Stored metadata');
+      }
+      
+      // Persist metadata to disk
+      try {
+        await storage.saveMetaStore(metaStore);
+        this.logger.Debug().Msg('Persisted metadata to disk');
+      } catch (error) {
+        this.logger.Error().Err(error).Msg('Failed to persist metadata to disk');
       }
     }
 
@@ -220,7 +365,7 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private handleDelMeta(_ctx: any, msg: any): Response {
+  private async handleDelMeta(_ctx: any, msg: any): Promise<Response> {
     const { meta } = msg;
     
     if (meta && meta.metas) {
@@ -228,6 +373,14 @@ class SimpleMsgDispatcher {
         const key = `main/${metaEntry.cid}`;
         metaStore.delete(key);
         this.logger.Debug().Str('key', key).Msg('Deleted metadata');
+      }
+      
+      // Persist metadata changes to disk
+      try {
+        await storage.saveMetaStore(metaStore);
+        this.logger.Debug().Msg('Persisted metadata deletion to disk');
+      } catch (error) {
+        this.logger.Error().Err(error).Msg('Failed to persist metadata deletion to disk');
       }
     }
 
@@ -262,14 +415,63 @@ class SimpleMsgDispatcher {
   }
 
   private handleGetData(_ctx: any, msg: any): Response {
-    // For now, return empty data
-    return new Response(JSON.stringify({
-      type: 'resGetData',
-      tid: msg.tid,
-      data: null
-    }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
+    try {
+      this.logger.Info().Any('reqGetDataMsg', msg).Msg('Handling reqGetData');
+      
+      // Extract CID from urlParam.key (CloudGateway format) or msg.cid (direct format)
+      const cid = msg.urlParam?.key || msg.cid;
+      if (!cid) {
+        this.logger.Error().Msg('No CID provided in reqGetData');
+        return new Response(JSON.stringify({
+          type: 'resGetData',
+          tid: msg.tid,
+          error: 'No CID provided'
+        }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // Check if CAR file exists
+      const carData = this.storage.getCarFile(cid);
+      if (!carData) {
+        this.logger.Error().Str('cid', cid).Msg('CAR file not found');
+        return new Response(JSON.stringify({
+          type: 'resGetData',
+          tid: msg.tid,
+          error: 'CAR file not found'
+        }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      
+      // Return signed URL for the CAR file (not the binary data directly)
+      const signedUrl = `http://localhost:3001/fp?car=${cid}`;
+      
+      this.logger.Info().Str('cid', cid).Str('signedUrl', signedUrl).Msg('Returning signed URL for CAR file');
+      
+      const response = {
+        type: 'resGetData',
+        tid: msg.tid,
+        signedUrl: signedUrl,
+        ok: true
+      };
+      
+      return new Response(JSON.stringify(response), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    } catch (error) {
+      this.logger.Error().Err(error).Msg('Error in handleGetData');
+      return new Response(JSON.stringify({
+        type: 'resGetData',
+        tid: msg.tid,
+        error: 'Internal server error'
+      }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
   }
 
   private handleDelData(_ctx: any, msg: any): Response {
@@ -285,7 +487,7 @@ class SimpleMsgDispatcher {
   private handleBindGetMeta(_ctx: any, msg: any): Response {
     this.logger.Info().Any('bindGetMetaMsg', msg).Msg('Handling bindGetMeta');
     
-    // For streaming metadata requests, we'll return the same data as regular getMeta
+    // For bindGetMeta, we need to return an EventGetMeta message with all existing metadata
     const entries: Array<{ cid: string; data: string; parents?: string[] }> = [];
 
     for (const [key, value] of metaStore.entries()) {
@@ -299,11 +501,19 @@ class SimpleMsgDispatcher {
       }
     }
 
-    return new Response(JSON.stringify({
-      type: 'resGetMeta',
+    // Return EventGetMeta message (not resGetMeta)
+    const eventResponse = {
+      type: 'eventGetMeta',
       tid: msg.tid,
+      conn: msg.conn,
+      tenant: msg.tenant,
+      ledger: msg.ledger,
       meta: { metas: entries, keys: [] }
-    }), {
+    };
+
+    this.logger.Info().Any('eventGetMetaResponse', eventResponse).Msg('Sending EventGetMeta response');
+
+    return new Response(JSON.stringify(eventResponse), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
@@ -324,12 +534,24 @@ export class FireproofBackend {
     this.logger = ensureLogger(this.sthis, 'FireproofBackend');
     this.ende = jsonEnDe(this.sthis);
     this.wsRoom = new SimpleWSRoom(this.sthis);
-    this.msgDispatcher = new SimpleMsgDispatcher(this.wsRoom, this.logger, this.ende, this.sthis);
+    this.msgDispatcher = new SimpleMsgDispatcher(this.wsRoom, this.logger, this.ende, this.sthis, storage);
     
     this.setupRoutes();
   }
 
   async initialize() {
+    // Initialize persistent storage
+    await storage.initialize();
+    
+    // Load existing data from disk
+    const loadedMetaStore = await storage.loadMetaStore();
+    metaStore.clear();
+    for (const [key, value] of loadedMetaStore.entries()) {
+      metaStore.set(key, value);
+    }
+    
+    this.logger.Info().Int('metaEntries', metaStore.size).Msg('Loaded existing metadata from disk');
+    
     // Initialize token service
     await this.initializeTokenService();
   }
@@ -373,8 +595,82 @@ export class FireproofBackend {
         });
       }
       
+      // Handle GET requests with query parameters (CloudGateway compatibility)
+      if (c.req.method === 'GET') {
+        const url = new URL(c.req.url);
+        const meta = url.searchParams.get('meta');
+        const car = url.searchParams.get('car');
+        
+        this.logger.Info()
+          .Str('meta', meta || 'none')
+          .Str('car', car || 'none')
+          .Msg('CloudGateway GET request');
+        
+        if (meta) {
+          // Return metadata for the specified meta name
+          const metaData = storage.getMetaStore();
+          const entries = Object.values(metaData);
+          
+          // Convert to Fireproof format
+          const fireproofMeta = entries.map((entry: any) => ({
+            eventCid: entry.cid,
+            parents: entry.parents || [],
+            dbMeta: {
+              cid: entry.cid,
+              parents: entry.parents || []
+            }
+          }));
+          
+          return c.json(fireproofMeta);
+        }
+        
+        if (car) {
+          // Return CAR file for the specified CID
+          const carData = storage.getCarFile(car);
+          if (carData) {
+            return new Response(carData.buffer as ArrayBuffer, {
+              headers: {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': carData.length.toString()
+              }
+            });
+          } else {
+            return c.json({ error: 'CAR file not found' }, 404);
+          }
+        }
+        
+        return c.json({ error: 'Invalid GET request' }, 400);
+      }
+      
       if (c.req.method === 'PUT') {
         try {
+          const url = new URL(c.req.url);
+          const meta = url.searchParams.get('meta');
+          const car = url.searchParams.get('car');
+          
+          // Handle PUT requests with query parameters (CloudGateway compatibility)
+          if (meta || car) {
+            this.logger.Info()
+              .Str('meta', meta || 'none')
+              .Str('car', car || 'none')
+              .Msg('CloudGateway PUT request');
+            
+            if (meta) {
+              // Handle metadata PUT request
+              const body = await c.req.json();
+              storage.putMeta(meta, body);
+              return c.json({ status: 'ok' });
+            }
+            
+            if (car) {
+              // Handle CAR file PUT request
+              const body = await c.req.json();
+              storage.putCarFile(car, body);
+              return c.json({ status: 'ok' });
+            }
+          }
+          
+          // Handle standard Fireproof protocol messages
           const msg = await c.req.json() as MsgBase;
           this.logger.Info().Any('msg', msg).Msg('Received Fireproof message');
           
@@ -403,7 +699,7 @@ export class FireproofBackend {
       return c.json({ 
         status: 'method not allowed',
         method: c.req.method,
-        allowed: ['PUT', 'OPTIONS']
+        allowed: ['GET', 'PUT', 'OPTIONS']
       }, 405);
     });
 
@@ -556,6 +852,47 @@ export class FireproofBackend {
         return c.text('WebSocket upgrade failed', 500);
       }
     });
+
+            // Key management endpoints for cross-browser sharing
+            this.app.post('/api/keys/:token', async (c: Context) => {
+              try {
+                const token = c.req.param('token');
+                const keys = await c.req.json();
+                
+                this.logger.Info()
+                  .Str('token', token)
+                  .Any('keys', keys)
+                  .Msg('Storing keys for token');
+                
+                storage.storeKeysForToken(token, keys);
+                
+                return c.json({ status: 'ok', message: 'Keys stored successfully' });
+              } catch (error) {
+                this.logger.Error().Err(error).Msg('Error storing keys');
+                return c.json({ error: 'Failed to store keys' }, 500);
+              }
+            });
+
+            this.app.get('/api/keys/:token', async (c: Context) => {
+              try {
+                const token = c.req.param('token');
+                
+                this.logger.Info()
+                  .Str('token', token)
+                  .Msg('Retrieving keys for token');
+                
+                const keys = storage.getKeysForToken(token);
+                
+                if (keys) {
+                  return c.json({ status: 'ok', keys });
+                } else {
+                  return c.json({ error: 'Keys not found for token' }, 404);
+                }
+              } catch (error) {
+                this.logger.Error().Err(error).Msg('Error retrieving keys');
+                return c.json({ error: 'Failed to retrieve keys' }, 500);
+              }
+            });
 
             // API endpoint for token management
             this.app.all('/api', async (c: Context) => {
@@ -772,7 +1109,16 @@ export class FireproofBackend {
         this.logger.Info().Str('filename', filename).Msg('File upload request');
         
         const fileData = await c.req.arrayBuffer();
-        carFiles.set(filename, new Uint8Array(fileData));
+        const uint8Data = new Uint8Array(fileData);
+        carFiles.set(filename, uint8Data);
+        
+        // Persist CAR file to disk
+        try {
+          await storage.saveCarFile(filename, uint8Data);
+          this.logger.Debug().Str('filename', filename).Msg('Persisted CAR file to disk');
+        } catch (error) {
+          this.logger.Error().Err(error).Msg('Failed to persist CAR file to disk');
+        }
         
         this.logger.Info().Str('filename', filename).Int('size', fileData.byteLength).Msg('File uploaded successfully');
         
@@ -838,7 +1184,16 @@ export class FireproofBackend {
             
             const fileData = await c.req.arrayBuffer();
             const filename = `upload-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-            carFiles.set(filename, new Uint8Array(fileData));
+            const uint8Data = new Uint8Array(fileData);
+            carFiles.set(filename, uint8Data);
+            
+            // Persist CAR file to disk
+            try {
+              await storage.saveCarFile(filename, uint8Data);
+              this.logger.Debug().Str('filename', filename).Msg('Persisted CAR file to disk');
+            } catch (error) {
+              this.logger.Error().Err(error).Msg('Failed to persist CAR file to disk');
+            }
             
             this.logger.Info().Str('filename', filename).Int('size', fileData.byteLength).Msg('📁 File uploaded via catch-all');
             
@@ -862,97 +1217,6 @@ export class FireproofBackend {
         url: c.req.url,
         timestamp: new Date().toISOString()
       }, 404);
-    });
-
-    // Legacy endpoints for backward compatibility
-    this.app.all('/fp', async (c: Context) => {
-      const url = new URL(c.req.url);
-      const car = url.searchParams.get('car');
-      const meta = url.searchParams.get('meta');
-      
-      this.logger.Debug().Str('method', c.req.method).Str('car', car || 'none').Str('meta', meta || 'none').Msg('Legacy endpoint');
-
-      try {
-        if (c.req.method === 'PUT') {
-          if (car) {
-            const carArrayBuffer = await c.req.arrayBuffer();
-            carFiles.set(car, new Uint8Array(carArrayBuffer));
-            this.logger.Debug().Str('car', car).Msg('Stored CAR file');
-            return c.json({ ok: true });
-          } else if (meta) {
-            const body = await c.req.json();
-            let entries: Array<{ data: string; cid: string; parents: string[] }>;
-            
-            if (Array.isArray(body)) {
-              entries = body;
-            } else {
-              entries = [body];
-            }
-            
-            for (const entry of entries) {
-              const { data, cid, parents } = entry;
-              metaStore.set(`${meta}/${cid}`, { data, parents });
-              this.logger.Debug().Str('meta', meta).Str('cid', cid).Msg('Stored metadata');
-            }
-            
-            return c.json({ ok: true });
-          }
-        } else if (c.req.method === 'GET') {
-          if (car) {
-            const carArrayBuffer = carFiles.get(car);
-            if (!carArrayBuffer) {
-              return c.json({ error: 'CAR file not found' }, 404);
-            }
-            return c.body(new Uint8Array(carArrayBuffer), 200, {
-              'Content-Type': 'application/octet-stream',
-            });
-          } else if (meta) {
-            const entries: Array<{ cid: string; data: string; parents?: string[] }> = [];
-            const allParents: string[] = [];
-
-            for (const [key, value] of metaStore.entries()) {
-              if (key.startsWith(`${meta}/`)) {
-                const cid = key.split('/')[1];
-                const { data, parents } = value;
-                
-                if (parents) {
-                  for (const p of parents) {
-                    allParents.push(p.toString());
-                    metaStore.delete(`${meta}/${p}`);
-                  }
-                }
-                
-                entries.push({ cid, data, parents });
-              }
-            }
-
-            const filteredEntries = entries.filter(
-              (entry) => entry.data !== null && !allParents.includes(entry.cid)
-            );
-
-            return c.json(filteredEntries);
-          }
-        } else if (c.req.method === 'DELETE') {
-          if (car) {
-            carFiles.delete(car);
-            return c.json({ ok: true });
-          } else if (meta) {
-            const keysToDelete: string[] = [];
-            for (const key of metaStore.keys()) {
-              if (key.startsWith(`${meta}/`)) {
-                keysToDelete.push(key);
-              }
-            }
-            keysToDelete.forEach(key => metaStore.delete(key));
-            return c.json({ ok: true });
-          }
-        }
-
-        return c.json({ error: 'Invalid request' }, 400);
-      } catch (error) {
-        this.logger.Error().Err(error).Msg('Legacy endpoint error');
-        return c.json({ error: 'Internal server error' }, 500);
-      }
     });
   }
 
