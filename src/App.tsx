@@ -14,62 +14,6 @@ interface Todo {
 }
 
 function App() {
-  // Configure shared keybag based on localStorage share token BEFORE useFireproof
-  const storedShareToken = localStorage.getItem('fireproof-share-token');
-  console.log('🔑 Share token from localStorage:', storedShareToken);
-  
-  if (storedShareToken && typeof window !== 'undefined') {
-    // Use the default Fireproof keybag since we're importing keys directly
-    // The keys are already in IndexedDB from the import process
-    console.log('🔑 Using default Fireproof keybag with imported keys');
-    
-    // Debug: Check what's actually in the keybag immediately
-    try {
-      console.log('🔍 Debugging keybag contents...');
-      const request = indexedDB.open('fp-keybag');
-      request.onsuccess = () => {
-        const db = request.result;
-        const transaction = db.transaction(['bag'], 'readonly');
-        const store = transaction.objectStore('bag');
-        const getAllRequest = store.getAll();
-        
-        getAllRequest.onsuccess = () => {
-          const keys = getAllRequest.result;
-          console.log('🔍 Keys found in fp-keybag:', keys.length);
-          console.log('🔍 Key details:', keys.map(k => ({ id: k.id, clazz: k.clazz })));
-          
-          // Check if we have the specific key that Fireproof is looking for
-          const urlTokenKey = keys.find(k => k.id === 'z2tnVGFiYt36KR/urlToken');
-          if (urlTokenKey) {
-            console.log('✅ Found the JWT key that Fireproof needs:', urlTokenKey.id);
-          } else {
-            console.log('❌ JWT key not found in keybag');
-          }
-        };
-      };
-    } catch (error) {
-      console.error('🔍 Error debugging keybag:', error);
-    }
-    
-    // We don't need to set FP_KEYBAG_URL since we're using the default
-    // The imported keys will be in the standard Fireproof keybag location
-    console.log('🔑 Keys should be available in default Fireproof keybag');
-  } else {
-    console.log('🔑 No share token found, using default keybag');
-  }
-
-  URI.protocolHasHostpart("fpcloud");
-  registerStoreProtocol({
-    protocol: "fpcloud",
-    defaultURI() {
-      return URI.from("fpcloud://localhost:3001/");
-    },
-    serdegateway: async (sthis: SuperThis) => {
-      return new CloudGateway(sthis);
-    },
-  });
-
-  // Also register HTTP protocol handler for our local server
   URI.protocolHasHostpart("http");
   registerStoreProtocol({
     protocol: "http",
@@ -80,7 +24,7 @@ function App() {
       return new CloudGateway(sthis);
     },
   });
-
+  
   const { database, useLiveQuery, useAllDocs, useDocument } = useFireproof("fireproof-todo-app", {
     attach: toCloud({
       dashboardURI: "http://localhost:3001/fp/cloud/api/token",
@@ -111,10 +55,6 @@ function App() {
   }))
 
   const [newTodoText, setNewTodoText] = useState("");
-  const [shareToken, setShareToken] = useState<string>("");
-  const [inviteLinkCid, setInviteLinkCid] = useState<string>("");
-  const [joinCid, setJoinCid] = useState<string>("");
-  const [connection, setConnection] = useState<any>(null);
 
   useEffect(() => {
     console.log('🔌 Database connection effect triggered');
@@ -181,11 +121,12 @@ function App() {
       
       // Try multiple possible Fireproof IndexedDB database names
       const possibleDbNames = [
-        'fp-keybag',  // This is the actual database name from the screenshot
-        'fireproof-keybag',
-        'fireproof-keybag-default',
-        'fireproof-keybag-shared',
-        'fireproof-keybag-fireproof-todo-app'
+        'fp-keybag',
+        //'fireproof-keybag',
+        //'fireproof-keybag-default',
+        //'fireproof-keybag-shared',
+        //'fireproof-keybag-fireproof-todo-app'
+
       ];
       
       for (const dbName of possibleDbNames) {
@@ -278,7 +219,7 @@ function App() {
     }
   };
 
-  const importKeysToIndexedDB = async (keyData: any) => {
+  const importKeysToIndexedDB = async (keyData: any) : Promise<{ success: boolean, importedCount: number }> => {
     try {
       console.log('🔑 Starting IndexedDB key import...', keyData);
       
@@ -487,107 +428,6 @@ function App() {
       alert('Failed to import keys: ' + error.message);
     }
   };
-
-  const createInviteLink = async () => {
-    if (!shareToken) {
-      alert('Please generate a share token first');
-      return;
-    }
-    
-    try {
-      // Create a simple invite link that contains the share token
-      const inviteData = {
-        token: shareToken,
-        timestamp: Date.now(),
-        databaseName: 'fireproof-todo-app'
-      };
-      
-      const inviteLink = btoa(JSON.stringify(inviteData));
-      setInviteLinkCid(inviteLink);
-      console.log('Invite link created:', inviteLink);
-      
-      // Store the invite link in localStorage
-      localStorage.setItem('fireproof-invite-link', inviteLink);
-    } catch (error) {
-      console.error('Error creating invite link:', error);
-    }
-  };
-
-  const joinSharedLedger = async () => {
-    if (!joinCid) {
-      alert('Please enter an invite link CID');
-      return;
-    }
-    
-    console.log('🔗 Starting to join shared ledger with CID:', joinCid);
-    
-    try {
-      let shareToken;
-      
-      // Try to parse as base64-encoded JSON first (new format)
-      try {
-        const inviteData = JSON.parse(atob(joinCid));
-        shareToken = inviteData.token;
-        console.log('🔗 Parsed invite data:', inviteData);
-      } catch (jsonError) {
-        console.log('🔗 Failed to parse as base64 JSON, trying direct base64...');
-        // If that fails, try treating it as a direct base64-encoded token
-        try {
-          shareToken = atob(joinCid);
-          console.log('🔗 Decoded direct token:', shareToken);
-        } catch (base64Error) {
-          console.log('🔗 Failed to parse as base64, using as plain token...');
-          // If both fail, treat it as a plain token string
-          shareToken = joinCid;
-          console.log('🔗 Using plain token:', shareToken);
-        }
-      }
-      
-      // Validate the token
-      if (!shareToken || shareToken.length < 5) {
-        console.error('🔗 Invalid share token:', shareToken);
-        throw new Error('Invalid token format');
-      }
-      
-      console.log('🔗 Valid share token found:', shareToken);
-      
-      // Store the shared token in localStorage
-      localStorage.setItem('fireproof-share-token', shareToken);
-      console.log('🔗 Stored share token in localStorage:', shareToken);
-      
-      // Retrieve keys from the server and import directly into IndexedDB
-      console.log('🔗 Retrieving keys from server...');
-      try {
-        const response = await fetch(`http://localhost:3001/api/keys/${shareToken}`);
-        if (response.ok) {
-          const data = await response.json();
-          console.log('🔗 Retrieved keys from server:', data);
-          
-          // Import keys directly into IndexedDB
-          console.log('🔗 Importing keys into IndexedDB...');
-          const importResult = await importKeysToIndexedDB(data.keys);
-          console.log('🔗 Import result:', importResult);
-          
-          if (importResult.success) {
-            console.log('🔗 Keys imported successfully into IndexedDB');
-            alert(`Successfully joined shared ledger with token: ${shareToken}! Imported ${importResult.importedCount} keys. Reloading page...`);
-            window.location.reload();
-          } else {
-            throw new Error('Failed to import keys into IndexedDB');
-          }
-        } else {
-          console.error('🔗 Failed to retrieve keys from server:', await response.text());
-          throw new Error('Failed to retrieve keys from server');
-        }
-      } catch (error) {
-        console.error('🔗 Error retrieving/importing keys:', error);
-        alert(`Failed to join shared ledger: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    } catch (error) {
-      console.error('🔗 Error joining shared ledger:', error);
-      alert(`Failed to join shared ledger: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
   
   return (
     <>
@@ -633,21 +473,7 @@ function App() {
           <p style={{ fontSize: '14px', color: '#666', marginBottom: '15px' }}>
             Use these tools to share your todos between different browsers/devices:
           </p>
-          
-          {/* Current Status */}
-          <div style={{ marginBottom: '15px', padding: '10px', backgroundColor: '#e9ecef', borderRadius: '4px' }}>
-            <h4>Current Status:</h4>
-            {storedShareToken ? (
-              <p style={{ color: '#28a745', fontSize: '14px' }}>
-                ✅ Connected to shared ledger with token: <code>{storedShareToken}</code>
-              </p>
-            ) : (
-              <p style={{ color: '#6c757d', fontSize: '14px' }}>
-                ⚪ Not connected to shared ledger (using local storage)
-              </p>
-            )}
-          </div>
-          
+
           {/* Export Keys */}
           <div style={{ marginBottom: '15px' }}>
             <h4>Step 1: Export Keys (Source Browser)</h4>

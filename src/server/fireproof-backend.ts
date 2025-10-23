@@ -13,44 +13,53 @@ import {
   MsgIsWithConn,
   QSId,
   qsidKey,
-  FPCloudClaim
+  FPCloudClaim,
+  MsgWithTenantLedger,
+  TenantLedger
 } from '@fireproof/core-types-protocols-cloud';
 import { HttpHeader } from '@adviser/cement';
 import { exception2Result, top_uint8 } from '@adviser/cement';
 import { SignJWT } from 'jose';
 import { generateKeyPair } from 'jose/key/generate/keypair';
-import { promises as fs, readFileSync, writeFileSync } from 'fs';
+import { promises as fs, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 // Persistent file-based storage
 class PersistentStorage {
   private dataDir: string;
-  private carFilesDir: string;
-  private metaStoreFile: string;
 
   constructor(dataDir: string = './data') {
     this.dataDir = dataDir;
-    this.carFilesDir = join(dataDir, 'car-files');
-    this.metaStoreFile = join(dataDir, 'meta-store.json');
+  }
+
+  // Helper method to get tenant/ledger specific paths
+  private getTenantLedgerPaths(tenantInfo : TenantLedger): { tenantDir: string; ledgerDir: string; carFilesDir: string; metaStoreFile: string } {
+    const tenantDir = join(this.dataDir, tenantInfo.tenant);
+    const ledgerDir = join(tenantDir, tenantInfo.ledger);
+    const carFilesDir = join(ledgerDir, 'car-files');
+    const metaStoreFile = join(ledgerDir, 'meta-store.json');
+    return { tenantDir, ledgerDir, carFilesDir, metaStoreFile };
   }
 
   async initialize(): Promise<void> {
     try {
       await fs.mkdir(this.dataDir, { recursive: true });
-      await fs.mkdir(this.carFilesDir, { recursive: true });
     } catch (error) {
       console.error('Failed to create data directories:', error);
     }
   }
 
-  async saveCarFile(key: string, data: Uint8Array): Promise<void> {
-    const filePath = join(this.carFilesDir, `${key}.car`);
+  async saveCarFile(tenantInfo : TenantLedger, key: string, data: Uint8Array): Promise<void> {
+    const { carFilesDir } = this.getTenantLedgerPaths(tenantInfo);
+    await fs.mkdir(carFilesDir, { recursive: true });
+    const filePath = join(carFilesDir, `${key}.car`);
     await fs.writeFile(filePath, data);
   }
 
-  async loadCarFile(key: string): Promise<Uint8Array | null> {
+  async loadCarFile(tenantInfo : TenantLedger, key: string): Promise<Uint8Array | null> {
     try {
-      const filePath = join(this.carFilesDir, `${key}.car`);
+      const { carFilesDir } = this.getTenantLedgerPaths(tenantInfo);
+      const filePath = join(carFilesDir, `${key}.car`);
       const data = await fs.readFile(filePath);
       return new Uint8Array(data);
     } catch (error) {
@@ -58,23 +67,27 @@ class PersistentStorage {
     }
   }
 
-  async deleteCarFile(key: string): Promise<void> {
+  async deleteCarFile(tenantInfo : TenantLedger, key: string): Promise<void> {
     try {
-      const filePath = join(this.carFilesDir, `${key}.car`);
+      const { carFilesDir } = this.getTenantLedgerPaths(tenantInfo);
+      const filePath = join(carFilesDir, `${key}.car`);
       await fs.unlink(filePath);
     } catch (error) {
       // File doesn't exist, that's fine
     }
   }
 
-  async saveMetaStore(metaStore: Map<string, { data: string; parents?: string[] }>): Promise<void> {
+  async saveMetaStore(tenantInfo : TenantLedger, metaStore: Map<string, { data: string; parents?: string[] }>): Promise<void> {
+    const { ledgerDir, metaStoreFile } = this.getTenantLedgerPaths(tenantInfo);
+    await fs.mkdir(ledgerDir, { recursive: true });
     const data = Object.fromEntries(metaStore);
-    await fs.writeFile(this.metaStoreFile, JSON.stringify(data, null, 2));
+    await fs.writeFile(metaStoreFile, JSON.stringify(data, null, 2));
   }
 
-  async loadMetaStore(): Promise<Map<string, { data: string; parents?: string[] }>> {
+  async loadMetaStore(tenantInfo : TenantLedger): Promise<Map<string, { data: string; parents?: string[] }>> {
     try {
-      const data = await fs.readFile(this.metaStoreFile, 'utf-8');
+      const { metaStoreFile } = this.getTenantLedgerPaths(tenantInfo);
+      const data = await fs.readFile(metaStoreFile, 'utf-8');
       const parsed = JSON.parse(data);
       return new Map(Object.entries(parsed));
     } catch (error) {
@@ -83,19 +96,21 @@ class PersistentStorage {
   }
 
   // Additional methods for CloudGateway compatibility
-  getMetaStore(): Record<string, { data: string; parents?: string[]; cid?: string }> {
+  getMetaStore(tenantInfo : TenantLedger): Record<string, { data: string; parents?: string[]; cid?: string }> {
     // This is a synchronous version for the CloudGateway compatibility
     try {
-      const data = readFileSync(this.metaStoreFile, 'utf-8');
+      const { metaStoreFile } = this.getTenantLedgerPaths(tenantInfo);
+      const data = readFileSync(metaStoreFile, 'utf-8');
       return JSON.parse(data);
     } catch (error) {
       return {};
     }
   }
 
-  getCarFile(cid: string): Uint8Array | null {
+  getCarFile(tenantInfo : TenantLedger, cid: string): Uint8Array | null {
     try {
-      const filePath = join(this.carFilesDir, `${cid}.car`);
+      const { carFilesDir } = this.getTenantLedgerPaths(tenantInfo);
+      const filePath = join(carFilesDir, `${cid}.car`);
       const data = readFileSync(filePath);
       return new Uint8Array(data);
     } catch (error) {
@@ -103,19 +118,23 @@ class PersistentStorage {
     }
   }
 
-  putMeta(key: string, data: any): void {
+  putMeta(tenantInfo : TenantLedger, key: string, data: any): void {
     try {
-      const metaStore = this.getMetaStore();
+      const { ledgerDir, metaStoreFile } = this.getTenantLedgerPaths(tenantInfo);
+      mkdirSync(ledgerDir, { recursive: true });
+      const metaStore = this.getMetaStore(tenantInfo);
       metaStore[key] = data;
-      writeFileSync(this.metaStoreFile, JSON.stringify(metaStore, null, 2));
+      writeFileSync(metaStoreFile, JSON.stringify(metaStore, null, 2));
     } catch (error) {
       console.error('Failed to save meta:', error);
     }
   }
 
-  putCarFile(cid: string, data: any): void {
+  putCarFile(tenantInfo : TenantLedger, cid: string, data: any): void {
     try {
-      const filePath = join(this.carFilesDir, `${cid}.car`);
+      const { carFilesDir } = this.getTenantLedgerPaths(tenantInfo);
+      mkdirSync(carFilesDir, { recursive: true });
+      const filePath = join(carFilesDir, `${cid}.car`);
       writeFileSync(filePath, JSON.stringify(data));
     } catch (error) {
       console.error('Failed to save CAR file:', error);
@@ -157,7 +176,7 @@ class PersistentStorage {
 // Persistent storage instance
 const storage = new PersistentStorage();
 const carFiles = new Map<string, Uint8Array>();
-const metaStore = new Map<string, { data: string; parents?: string[] }>();
+// const metaStore = new Map<string, { data: string; parents?: string[] }>();
 
 // Simple WebSocket room implementation
 class SimpleWSRoom {
@@ -196,16 +215,12 @@ class SimpleWSRoom {
 
 // Simple message dispatcher for Fireproof protocol
 class SimpleMsgDispatcher {
-  private wsRoom: SimpleWSRoom;
   private logger: any;
-  private ende: any;
   private sthis: SuperThis;
   private storage: PersistentStorage;
 
-  constructor(wsRoom: SimpleWSRoom, logger: any, ende: any, sthis: SuperThis, storage: PersistentStorage) {
-    this.wsRoom = wsRoom;
+  constructor(_wsRoom: SimpleWSRoom, logger: any, _ende: any, sthis: SuperThis, storage: PersistentStorage) {
     this.logger = logger;
-    this.ende = ende;
     this.sthis = sthis;
     this.storage = storage;
   }
@@ -214,6 +229,16 @@ class SimpleMsgDispatcher {
     try {
       this.logger.Info().Any('msg', msg).Msg('Dispatching message');
 
+      if (msg.type !== 'reqGestalt' && msg.type !== 'reqOpen') {
+        if (!(msg as MsgWithTenantLedger<MsgBase>).tenant) {
+          this.logger.Error().Msg('Tenant and ledger are required');
+          return new Response(JSON.stringify({ error: 'Tenant and ledger are required' }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }  
+      }
+
       // Handle different message types
       switch (msg.type) {
         case 'reqGestalt':
@@ -221,20 +246,20 @@ class SimpleMsgDispatcher {
         case 'reqOpen':
           return this.handleOpen(ctx, msg);
         case 'reqPutMeta':
-          return this.handlePutMeta(ctx, msg);
+          return this.handlePutMeta((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         case 'reqGetMeta':
-          return this.handleGetMeta(ctx, msg);
+          return this.handleGetMeta((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         case 'reqDelMeta':
-          return this.handleDelMeta(ctx, msg);
+          return this.handleDelMeta((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         case 'reqPutData':
-          return this.handlePutData(ctx, msg);
+          return this.handlePutData((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         case 'reqGetData':
-          return this.handleGetData(ctx, msg);
+          return this.handleGetData((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         case 'reqDelData':
-          return this.handleDelData(ctx, msg);
+          return this.handleDelData((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         case 'bindGetMeta':
           // Handle streaming metadata requests
-          return this.handleBindGetMeta(ctx, msg);
+          return this.handleBindGetMeta((msg as MsgWithTenantLedger<MsgBase>).tenant, ctx, msg);
         default:
           this.logger.Warn().Str('type', msg.type).Msg('Unknown message type');
           return new Response(JSON.stringify({ error: 'Unknown message type' }), {
@@ -305,25 +330,32 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private async handlePutMeta(_ctx: any, msg: any): Promise<Response> {
+  private async handlePutMeta(tenantInfo : TenantLedger, _ctx: any, msg: any): Promise<Response> {
     this.logger.Info().Any('putMetaMsg', msg).Msg('Handling reqPutMeta');
+    
+    // Extract tenant and ledger from message
+    const tenant = tenantInfo.tenant;
+    const ledger = tenantInfo.ledger;
     
     const { meta } = msg;
     
     if (meta && meta.metas) {
+      // Load existing metadata for this tenant/ledger
+      const tenantLedgerMetaStore = await this.storage.loadMetaStore(tenantInfo);
+      
       for (const metaEntry of meta.metas) {
         const key = `main/${metaEntry.cid}`;
-        metaStore.set(key, {
+        tenantLedgerMetaStore.set(key, {
           data: metaEntry.data,
           parents: metaEntry.parents
         });
-        this.logger.Debug().Str('key', key).Msg('Stored metadata');
+        this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Str('key', key).Msg('Stored metadata');
       }
       
       // Persist metadata to disk
       try {
-        await storage.saveMetaStore(metaStore);
-        this.logger.Debug().Msg('Persisted metadata to disk');
+        await this.storage.saveMetaStore(tenantInfo, tenantLedgerMetaStore);
+        this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Msg('Persisted metadata to disk');
       } catch (error) {
         this.logger.Error().Err(error).Msg('Failed to persist metadata to disk');
       }
@@ -342,10 +374,17 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private handleGetMeta(_ctx: any, msg: any): Response {
-    const entries: Array<{ cid: string; data: string; parents?: string[] }> = [];
+  private handleGetMeta(tenantInfo : TenantLedger, _ctx: any, msg: any): Response {
+    // Extract tenant and ledger from message
+    const tenant = tenantInfo.tenant;
+    const ledger = tenantInfo.ledger;
 
-    for (const [key, value] of metaStore.entries()) {
+    const entries: Array<{ cid: string; data: string; parents?: string[] }> = [];
+    
+    // Load metadata for this specific tenant/ledger
+    const tenantLedgerMetaStore = this.storage.getMetaStore(tenantInfo);
+
+    for (const [key, value] of Object.entries(tenantLedgerMetaStore)) {
       if (key.startsWith('main/')) {
         const cid = key.split('/')[1];
         entries.push({
@@ -356,6 +395,8 @@ class SimpleMsgDispatcher {
       }
     }
 
+    this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Int('entries', entries.length).Msg('Retrieved metadata');
+
     return new Response(JSON.stringify({
       type: 'resGetMeta',
       tid: msg.tid,
@@ -365,20 +406,27 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private async handleDelMeta(_ctx: any, msg: any): Promise<Response> {
+  private async handleDelMeta(tenantInfo : TenantLedger, _ctx: any, msg: any): Promise<Response> {
+    // Extract tenant and ledger from message
+    const tenant = tenantInfo.tenant;
+    const ledger = tenantInfo.ledger;
+    
     const { meta } = msg;
     
     if (meta && meta.metas) {
+      // Load existing metadata for this tenant/ledger
+      const tenantLedgerMetaStore = await this.storage.loadMetaStore(tenantInfo);
+      
       for (const metaEntry of meta.metas) {
         const key = `main/${metaEntry.cid}`;
-        metaStore.delete(key);
-        this.logger.Debug().Str('key', key).Msg('Deleted metadata');
+        tenantLedgerMetaStore.delete(key);
+        this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Str('key', key).Msg('Deleted metadata');
       }
       
       // Persist metadata changes to disk
       try {
-        await storage.saveMetaStore(metaStore);
-        this.logger.Debug().Msg('Persisted metadata deletion to disk');
+        await this.storage.saveMetaStore(tenantInfo, tenantLedgerMetaStore);
+        this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Msg('Persisted metadata deletion to disk');
       } catch (error) {
         this.logger.Error().Err(error).Msg('Failed to persist metadata deletion to disk');
       }
@@ -393,12 +441,16 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private handlePutData(_ctx: any, msg: any): Response {
+  private handlePutData(tenantInfo : TenantLedger, _ctx: any, msg: any): Response {
     this.logger.Info().Any('putDataMsg', msg).Msg('Handling reqPutData');
+    
+    // Extract tenant and ledger from message
+    const tenant = tenantInfo.tenant;
+    const ledger = tenantInfo.ledger;
     
     // Extract the key from the URL parameters to create a proper upload URL
     const key = msg.urlParam?.key || 'unknown';
-    const signedUrl = `http://localhost:3001/upload/${key}`;
+    const signedUrl = `http://localhost:3001/upload/${tenant}/${ledger}/${key}`;
     
     const response = {
       type: 'resPutData',
@@ -407,16 +459,20 @@ class SimpleMsgDispatcher {
       ok: true
     };
     
-    this.logger.Info().Any('putDataResponse', response).Msg('Sending resPutData response with signedUrl');
+    this.logger.Info().Str('tenant', tenant).Str('ledger', ledger).Str('signedUrl', signedUrl).Msg('Sending resPutData response with signedUrl');
     
     return new Response(JSON.stringify(response), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  private handleGetData(_ctx: any, msg: any): Response {
+  private handleGetData(tenantInfo : TenantLedger, _ctx: any, msg: any): Response {
     try {
       this.logger.Info().Any('reqGetDataMsg', msg).Msg('Handling reqGetData');
+      
+      // Extract tenant and ledger from message
+      const tenant = tenantInfo.tenant;
+      const ledger = tenantInfo.ledger;
       
       // Extract CID from urlParam.key (CloudGateway format) or msg.cid (direct format)
       const cid = msg.urlParam?.key || msg.cid;
@@ -432,10 +488,10 @@ class SimpleMsgDispatcher {
         });
       }
       
-      // Check if CAR file exists
-      const carData = this.storage.getCarFile(cid);
+      // Check if CAR file exists for this tenant/ledger
+      const carData = this.storage.getCarFile(tenantInfo, cid);
       if (!carData) {
-        this.logger.Error().Str('cid', cid).Msg('CAR file not found');
+        this.logger.Error().Str('tenant', tenant).Str('ledger', ledger).Str('cid', cid).Msg('CAR file not found');
         return new Response(JSON.stringify({
           type: 'resGetData',
           tid: msg.tid,
@@ -447,9 +503,9 @@ class SimpleMsgDispatcher {
       }
       
       // Return signed URL for the CAR file (not the binary data directly)
-      const signedUrl = `http://localhost:3001/fp?car=${cid}`;
+      const signedUrl = `http://localhost:3001/fp?car=${cid}&tenant=${tenant}&ledger=${ledger}`;
       
-      this.logger.Info().Str('cid', cid).Str('signedUrl', signedUrl).Msg('Returning signed URL for CAR file');
+      this.logger.Info().Str('tenant', tenant).Str('ledger', ledger).Str('cid', cid).Str('signedUrl', signedUrl).Msg('Returning signed URL for CAR file');
       
       const response = {
         type: 'resGetData',
@@ -474,7 +530,19 @@ class SimpleMsgDispatcher {
     }
   }
 
-  private handleDelData(_ctx: any, msg: any): Response {
+  private handleDelData(tenantInfo : TenantLedger, _ctx: any, msg: any): Response {
+    // Extract tenant and ledger from message
+    const tenant = tenantInfo.tenant;
+    const ledger = tenantInfo.ledger;
+    
+    // Extract CID from urlParam.key (CloudGateway format) or msg.cid (direct format)
+    const cid = msg.urlParam?.key || msg.cid;
+    if (cid) {
+      // Delete CAR file for this tenant/ledger
+      this.storage.deleteCarFile(tenantInfo, cid);
+      this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Str('cid', cid).Msg('Deleted CAR file');
+    }
+
     return new Response(JSON.stringify({
       type: 'resDelData',
       tid: msg.tid,
@@ -484,13 +552,20 @@ class SimpleMsgDispatcher {
     });
   }
 
-  private handleBindGetMeta(_ctx: any, msg: any): Response {
+  private handleBindGetMeta(tenantInfo : TenantLedger, _ctx: any, msg: any): Response {
     this.logger.Info().Any('bindGetMetaMsg', msg).Msg('Handling bindGetMeta');
+    
+    // Extract tenant and ledger from message
+    const tenant = tenantInfo.tenant;
+    const ledger = tenantInfo.ledger;
     
     // For bindGetMeta, we need to return an EventGetMeta message with all existing metadata
     const entries: Array<{ cid: string; data: string; parents?: string[] }> = [];
 
-    for (const [key, value] of metaStore.entries()) {
+    // Load metadata for this specific tenant/ledger
+    const tenantLedgerMetaStore = this.storage.getMetaStore(tenantInfo);
+
+    for (const [key, value] of Object.entries(tenantLedgerMetaStore)) {
       if (key.startsWith('main/')) {
         const cid = key.split('/')[1];
         entries.push({
@@ -500,6 +575,8 @@ class SimpleMsgDispatcher {
         });
       }
     }
+
+    this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Int('entries', entries.length).Msg('Retrieved metadata for bindGetMeta');
 
     // Return EventGetMeta message (not resGetMeta)
     const eventResponse = {
@@ -543,15 +620,17 @@ export class FireproofBackend {
     // Initialize persistent storage
     await storage.initialize();
     
-    // Load existing data from disk
-    const loadedMetaStore = await storage.loadMetaStore();
+    // Load existing data from disk (using default tenant/ledger for backward compatibility)
+    /*
+    const loadedMetaStore = await storage.loadMetaStore('default', 'default');
     metaStore.clear();
     for (const [key, value] of loadedMetaStore.entries()) {
       metaStore.set(key, value);
     }
+
     
     this.logger.Info().Int('metaEntries', metaStore.size).Msg('Loaded existing metadata from disk');
-    
+    */
     // Initialize token service
     await this.initializeTokenService();
   }
@@ -607,8 +686,12 @@ export class FireproofBackend {
           .Msg('CloudGateway GET request');
         
         if (meta) {
+          // Extract tenant and ledger from query parameters
+          const tenant = url.searchParams.get('tenant') || 'default';
+          const ledger = url.searchParams.get('ledger') || 'default';
+          
           // Return metadata for the specified meta name
-          const metaData = storage.getMetaStore();
+          const metaData = storage.getMetaStore( {tenant, ledger} );
           const entries = Object.values(metaData);
           
           // Convert to Fireproof format
@@ -625,8 +708,12 @@ export class FireproofBackend {
         }
         
         if (car) {
+          // Extract tenant and ledger from query parameters
+          const tenant = url.searchParams.get('tenant') || 'default';
+          const ledger = url.searchParams.get('ledger') || 'default';
+          
           // Return CAR file for the specified CID
-          const carData = storage.getCarFile(car);
+          const carData = storage.getCarFile( {tenant, ledger}, car);
           if (carData) {
             return new Response(carData.buffer as ArrayBuffer, {
               headers: {
@@ -656,16 +743,24 @@ export class FireproofBackend {
               .Msg('CloudGateway PUT request');
             
             if (meta) {
+              // Extract tenant and ledger from query parameters
+              const tenant = url.searchParams.get('tenant') || 'default';
+              const ledger = url.searchParams.get('ledger') || 'default';
+              
               // Handle metadata PUT request
               const body = await c.req.json();
-              storage.putMeta(meta, body);
+              storage.putMeta( {tenant, ledger}, meta, body);
               return c.json({ status: 'ok' });
             }
             
             if (car) {
+              // Extract tenant and ledger from query parameters
+              const tenant = url.searchParams.get('tenant') || 'default';
+              const ledger = url.searchParams.get('ledger') || 'default';
+              
               // Handle CAR file PUT request
               const body = await c.req.json();
-              storage.putCarFile(car, body);
+              storage.putCarFile( {tenant, ledger}, car, body);
               return c.json({ status: 'ok' });
             }
           }
@@ -936,18 +1031,6 @@ export class FireproofBackend {
                 .setExpirationTime('24h')
                 .sign(this.privateKey);
               
-              const claims: FPCloudClaim = {
-                userId: 'demo-user',
-                email: 'demo@example.com',
-                created: new Date(),
-                tenants: [{ id: 'demo-tenant', role: 'admin' }],
-                ledgers: [{ id: 'fireproof-todo-app', role: 'admin', right: 'write' }],
-                selected: {
-                  tenant: 'demo-tenant',
-                  ledger: 'fireproof-todo-app'
-                }
-              };
-              
                       return c.json({
                         type: 'resTokenByResultId',
                         status: 'found',
@@ -1064,18 +1147,6 @@ export class FireproofBackend {
                         .setExpirationTime('24h')
                         .sign(this.privateKey);
                       
-                      const claims: FPCloudClaim = {
-                        userId: 'demo-user',
-                        email: 'demo@example.com',
-                        created: new Date(),
-                        tenants: [{ id: 'demo-tenant', role: 'admin' }],
-                        ledgers: [{ id: 'fireproof-todo-app', role: 'admin', right: 'write' }],
-                        selected: {
-                          tenant: 'demo-tenant',
-                          ledger: 'fireproof-todo-app'
-                        }
-                      };
-                      
                       const response = {
                         type: 'resTokenByResultId',
                         status: 'found',
@@ -1102,20 +1173,56 @@ export class FireproofBackend {
               });
             });
 
-    // File upload endpoint for CAR files
-    this.app.put('/upload/:filename', async (c: Context) => {
+    // File upload endpoint for CAR files with tenant/ledger support
+    this.app.put('/upload/:tenant/:ledger/:filename', async (c: Context) => {
       try {
+        const tenant = c.req.param('tenant');
+        const ledger = c.req.param('ledger');
         const filename = c.req.param('filename');
-        this.logger.Info().Str('filename', filename).Msg('File upload request');
+        this.logger.Info().Str('tenant', tenant).Str('ledger', ledger).Str('filename', filename).Msg('File upload request');
         
         const fileData = await c.req.arrayBuffer();
         const uint8Data = new Uint8Array(fileData);
         carFiles.set(filename, uint8Data);
         
-        // Persist CAR file to disk
+        // Persist CAR file to disk with tenant/ledger structure
         try {
-          await storage.saveCarFile(filename, uint8Data);
-          this.logger.Debug().Str('filename', filename).Msg('Persisted CAR file to disk');
+          await storage.saveCarFile( {tenant, ledger}, filename, uint8Data);
+          this.logger.Debug().Str('tenant', tenant).Str('ledger', ledger).Str('filename', filename).Msg('Persisted CAR file to disk');
+        } catch (error) {
+          this.logger.Error().Err(error).Msg('Failed to persist CAR file to disk');
+        }
+        
+        this.logger.Info().Str('tenant', tenant).Str('ledger', ledger).Str('filename', filename).Int('size', fileData.byteLength).Msg('File uploaded successfully');
+        
+        return c.json({ 
+          status: 'ok',
+          tenant,
+          ledger,
+          filename,
+          size: fileData.byteLength,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        this.logger.Error().Err(error).Msg('File upload error');
+        return c.json({ error: 'File upload failed' }, 500);
+      }
+    });
+
+    // Legacy file upload endpoint for backward compatibility
+    this.app.put('/upload/:filename', async (c: Context) => {
+      try {
+        const filename = c.req.param('filename');
+        this.logger.Info().Str('filename', filename).Msg('Legacy file upload request');
+        
+        const fileData = await c.req.arrayBuffer();
+        const uint8Data = new Uint8Array(fileData);
+        carFiles.set(filename, uint8Data);
+        
+        // Persist CAR file to disk with default tenant/ledger
+        try {
+          await storage.saveCarFile( {tenant: 'default', ledger: 'default'}, filename, uint8Data);
+          this.logger.Debug().Str('filename', filename).Msg('Persisted CAR file to disk with default tenant/ledger');
         } catch (error) {
           this.logger.Error().Err(error).Msg('Failed to persist CAR file to disk');
         }
@@ -1187,10 +1294,10 @@ export class FireproofBackend {
             const uint8Data = new Uint8Array(fileData);
             carFiles.set(filename, uint8Data);
             
-            // Persist CAR file to disk
+            // Persist CAR file to disk with default tenant/ledger
             try {
-              await storage.saveCarFile(filename, uint8Data);
-              this.logger.Debug().Str('filename', filename).Msg('Persisted CAR file to disk');
+              await storage.saveCarFile( {tenant: 'default', ledger: 'default'}, filename, uint8Data);
+              this.logger.Debug().Str('filename', filename).Msg('Persisted CAR file to disk with default tenant/ledger');
             } catch (error) {
               this.logger.Error().Err(error).Msg('Failed to persist CAR file to disk');
             }
