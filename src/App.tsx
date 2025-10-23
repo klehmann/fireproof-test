@@ -114,8 +114,118 @@ function App() {
     }
   };
 
+  // Type definitions for key export/import
+  interface KeyExportData {
+    timestamp: number;
+    dbName: string;
+    data: Record<string, any[]>;
+    version: number;
+    hasData: boolean;
+  }
+
+  // Encryption utilities for secure key export/import
+  const deriveKeyFromSecret = async (secret: string): Promise<CryptoKey> => {
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(secret),
+      'PBKDF2',
+      false,
+      ['deriveBits', 'deriveKey']
+    );
+    
+    return crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: encoder.encode('fireproof-keybag-salt'), // Fixed salt for consistency
+        iterations: 100000,
+        hash: 'SHA-256'
+      },
+      keyMaterial,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt']
+    );
+  };
+
+  const encryptKeyData = async (keyData: any, secret: string): Promise<string> => {
+    const key = await deriveKeyFromSecret(secret);
+    const encoder = new TextEncoder();
+    const jsonString = JSON.stringify(keyData);
+    const data = encoder.encode(jsonString);
+    
+    // Generate random IV
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    
+    // Encrypt the data
+    const encryptedData = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: iv },
+      key,
+      data
+    );
+    
+    // Combine IV and encrypted data
+    const combined = new Uint8Array(iv.length + encryptedData.byteLength);
+    combined.set(iv);
+    combined.set(new Uint8Array(encryptedData), iv.length);
+    
+    // Convert to base64
+    return btoa(String.fromCharCode(...combined));
+  };
+
+  const decryptKeyData = async (encryptedBase64: string, secret: string): Promise<any> => {
+    const key = await deriveKeyFromSecret(secret);
+    
+    // Decode base64
+    const combined = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+    
+    // Extract IV and encrypted data
+    const iv = combined.slice(0, 12);
+    const encryptedData = combined.slice(12);
+    
+    // Decrypt the data
+    const decryptedData = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: iv },
+      key,
+      encryptedData
+    );
+    
+    // Convert back to JSON
+    const decoder = new TextDecoder();
+    const jsonString = decoder.decode(decryptedData);
+    return JSON.parse(jsonString);
+  };
+
+  const createSecureKeyWrapper = (keyData: any): any => {
+    return {
+      version: '1.0',
+      timestamp: new Date().toISOString(),
+      type: 'fireproof-keybag-export',
+      data: keyData,
+      checksum: btoa(JSON.stringify(keyData)).slice(0, 16) // Simple checksum for validation
+    };
+  };
+
+  const validateSecureKeyWrapper = (wrapper: any): boolean => {
+    if (!wrapper || typeof wrapper !== 'object') return false;
+    if (wrapper.version !== '1.0') return false;
+    if (wrapper.type !== 'fireproof-keybag-export') return false;
+    if (!wrapper.timestamp || !wrapper.data) return false;
+    
+    // Validate timestamp format
+    try {
+      new Date(wrapper.timestamp);
+    } catch {
+      return false;
+    }
+    
+    // Validate checksum
+    const expectedChecksum = btoa(JSON.stringify(wrapper.data)).slice(0, 16);
+    return wrapper.checksum === expectedChecksum;
+  };
+
   // IndexedDB key export/import functions
-  const exportKeysFromIndexedDB = async () => {
+  const exportKeysFromIndexedDB = async (): Promise<KeyExportData> => {
     try {
       console.log('🔑 Starting IndexedDB key export...');
       
@@ -134,7 +244,7 @@ function App() {
           console.log(`🔑 Trying to open database: ${dbName}`);
           const request = indexedDB.open(dbName);
           
-          const result = await new Promise((resolve, reject) => {
+          const result = await new Promise<KeyExportData | null>((resolve, _reject) => {
             request.onerror = () => {
               console.log(`🔑 Failed to open ${dbName}:`, request.error);
               resolve(null); // Continue to next database
@@ -231,10 +341,10 @@ function App() {
       const dbName = keyData.dbName || 'fp-keybag';
       const request = indexedDB.open(dbName);
       
-      return new Promise((resolve, reject) => {
+      return new Promise((resolve, _reject) => {
         request.onerror = () => {
           console.error('🔑 Failed to open IndexedDB for import:', request.error);
-          reject(request.error);
+          resolve({ success: false, importedCount: 0 });
         };
         
         request.onsuccess = () => {
@@ -352,61 +462,109 @@ function App() {
       console.log('🔑 Exported keys from IndexedDB:', keyExportData);
       
       if (keyExportData.hasData) {
-        // Convert to base64 for easy copying
-        const jsonString = JSON.stringify(keyExportData);
-        const base64String = btoa(jsonString);
-        
-        console.log('🔑 Base64 encoded keys:', base64String);
-        
-        // Show the base64 string to the user for copying
-        const userConfirmed = confirm(
-          `Keys exported successfully!\n\n` +
-          `Copy this base64 string to share with another browser:\n\n` +
-          `${base64String}\n\n` +
-          `Click OK to copy to clipboard, or Cancel to just see it.`
+        // Prompt user for encryption secret
+        const secret = prompt(
+          'Enter a secret word to encrypt your keys:\n\n' +
+          '(This secret will be needed to decrypt the keys in another browser)\n\n' +
+          'Secret:'
         );
         
-        if (userConfirmed) {
-          try {
-            await navigator.clipboard.writeText(base64String);
-            alert('Keys copied to clipboard! Paste them in the other browser.');
-          } catch (error) {
-            console.error('Failed to copy to clipboard:', error);
-            alert('Failed to copy to clipboard. Please copy manually:\n\n' + base64String);
+        if (!secret) {
+          console.log('🔑 Export cancelled by user');
+          return;
+        }
+        
+        if (secret.length < 4) {
+          alert('Secret must be at least 4 characters long.');
+          return;
+        }
+        
+        try {
+          console.log('🔑 Creating secure wrapper...');
+          const secureWrapper = createSecureKeyWrapper(keyExportData);
+          console.log('🔑 Secure wrapper created:', secureWrapper);
+          
+          console.log('🔑 Encrypting keys...');
+          const encryptedBase64 = await encryptKeyData(secureWrapper, secret);
+          console.log('🔑 Keys encrypted successfully');
+          
+          // Show the encrypted base64 string to the user for copying
+          const userConfirmed = confirm(
+            `Keys exported and encrypted successfully!\n\n` +
+            `Copy this encrypted base64 string to share with another browser:\n\n` +
+            `${encryptedBase64}\n\n` +
+            `Click OK to copy to clipboard, or Cancel to just see it.\n\n` +
+            `Remember: You'll need the secret word "${secret}" to decrypt these keys.`
+          );
+          
+          if (userConfirmed) {
+            try {
+              await navigator.clipboard.writeText(encryptedBase64);
+              alert('Encrypted keys copied to clipboard! Paste them in the other browser along with the secret word.');
+            } catch (error) {
+              console.error('Failed to copy to clipboard:', error);
+              alert('Failed to copy to clipboard. Please copy manually:\n\n' + encryptedBase64);
+            }
+          } else {
+            alert('Keys exported and encrypted. Copy this base64 string:\n\n' + encryptedBase64 + '\n\nRemember the secret word: "' + secret + '"');
           }
-        } else {
-          alert('Keys exported. Copy this base64 string:\n\n' + base64String);
+        } catch (encryptionError) {
+          console.error('🔑 Error encrypting keys:', encryptionError);
+          alert('Failed to encrypt keys: ' + (encryptionError as Error).message);
         }
       } else {
         alert('No keys found to export. Try adding a todo item first to generate keys.');
       }
     } catch (error) {
       console.error('Error exporting keys:', error);
-      alert('Failed to export keys: ' + error.message);
+      alert('Failed to export keys: ' + (error as Error).message);
     }
   };
 
   const importKeys = async () => {
     try {
-      // Prompt user to paste the base64 string
-      const base64String = prompt(
-        'Paste the base64-encoded keys from the other browser:\n\n' +
-        '(This should be a long string that starts with "eyJ0aW1lc3RhbXAiOiI...")'
+      // Prompt user to paste the encrypted base64 string
+      const encryptedBase64 = prompt(
+        'Paste the encrypted base64-encoded keys from the other browser:\n\n' +
+        '(This should be a long encrypted string)\n\n' +
+        'Encrypted keys:'
       );
       
-      if (!base64String) {
+      if (!encryptedBase64) {
         console.log('🔑 Import cancelled by user');
         return;
       }
       
-      console.log('🔑 Received base64 string:', base64String.substring(0, 50) + '...');
+      console.log('🔑 Received encrypted base64 string:', encryptedBase64.substring(0, 50) + '...');
+      
+      // Prompt user for the secret word
+      const secret = prompt(
+        'Enter the secret word used to encrypt these keys:\n\n' +
+        '(This must match the secret used when exporting the keys)\n\n' +
+        'Secret:'
+      );
+      
+      if (!secret) {
+        console.log('🔑 Import cancelled by user (no secret)');
+        return;
+      }
       
       try {
-        // Decode the base64 string
-        const jsonString = atob(base64String);
-        const keyData = JSON.parse(jsonString);
+        console.log('🔑 Decrypting keys...');
+        const decryptedWrapper = await decryptKeyData(encryptedBase64, secret);
+        console.log('🔑 Decrypted wrapper:', decryptedWrapper);
         
-        console.log('🔑 Decoded key data:', keyData);
+        // Validate the decrypted wrapper
+        if (!validateSecureKeyWrapper(decryptedWrapper)) {
+          throw new Error('Invalid or corrupted key data. The secret may be incorrect or the data may be damaged.');
+        }
+        
+        console.log('🔑 Wrapper validation passed');
+        console.log('🔑 Key export timestamp:', decryptedWrapper.timestamp);
+        
+        // Extract the actual key data
+        const keyData = decryptedWrapper.data;
+        console.log('🔑 Extracted key data:', keyData);
         
         // Import keys into IndexedDB
         console.log('🔑 Importing keys into IndexedDB...');
@@ -414,18 +572,28 @@ function App() {
         console.log('🔑 Import result:', importResult);
         
         if (importResult.success) {
-          alert(`Keys imported successfully! Imported ${importResult.importedCount} keys.\n\nReload the page to use the shared data.`);
+          const exportDate = new Date(decryptedWrapper.timestamp).toLocaleString();
+          alert(
+            `Keys imported successfully!\n\n` +
+            `Imported ${importResult.importedCount} keys.\n` +
+            `Original export date: ${exportDate}\n\n` +
+            `Reload the page to use the shared data.`
+          );
           window.location.reload();
         } else {
           throw new Error('Failed to import keys into IndexedDB');
         }
-      } catch (decodeError) {
-        console.error('🔑 Error decoding/importing keys:', decodeError);
-        alert('Failed to decode or import keys. Please check that you copied the complete base64 string.');
+      } catch (decryptError) {
+        console.error('🔑 Error decrypting/importing keys:', decryptError);
+        if ((decryptError as Error).message.includes('Invalid or corrupted')) {
+          alert('Failed to decrypt keys. Please check:\n\n1. The secret word is correct\n2. The encrypted data was copied completely\n3. The data hasn\'t been modified');
+        } else {
+          alert('Failed to decrypt or import keys. Please check that you copied the complete encrypted string and entered the correct secret word.');
+        }
       }
     } catch (error) {
       console.error('Error importing keys:', error);
-      alert('Failed to import keys: ' + error.message);
+      alert('Failed to import keys: ' + (error as Error).message);
     }
   };
   
