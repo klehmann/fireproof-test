@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { config } from './config';
 import { URI } from '@adviser/cement';
 import { CloudGateway } from '@fireproof/core-gateways-cloud';
+import type { ClockHead } from '@fireproof/core-types-base';
 
 interface Todo {
   _id?: string;
@@ -55,6 +56,8 @@ function App() {
   }))
 
   const [newTodoText, setNewTodoText] = useState("");
+  const [changesData, setChangesData] = useState<string>("");
+  const [changesClock, setChangesClock] = useState<ClockHead | undefined>(undefined);
 
   useEffect(() => {
     console.log('🔌 Database connection effect triggered');
@@ -113,6 +116,97 @@ function App() {
       handleAddTodo();
     }
   };
+
+  const fetchAllChanges = async () => {
+    try {
+      console.log('📊 Fetching all changes from database...');
+      
+      const changes = await database.changes(undefined);
+      console.log('📊 All changes received:', changes);
+      
+      // Update the clock for next fetch
+      setChangesClock(changes.clock);
+      
+      // Format the changes data as JSON string
+      const formattedData = JSON.stringify(changes, null, 2);
+      setChangesData(formattedData);
+      
+      console.log('📊 All changes data updated');
+    } catch (error) {
+      console.error('Error fetching all changes:', error);
+      setChangesData(`Error fetching all changes: ${(error as Error).message}`);
+    }
+  };
+
+  const fetchRecentChanges = async () => {
+    try {
+      console.log('📊 Fetching recent changes from database...');
+      console.log('📊 Current clock:', changesClock);
+      
+      if (!changesClock) {
+        setChangesData('No previous clock found. Use "Fetch All Changes" first to establish a clock position.');
+        return;
+      }
+      
+      const changes = await database.changes(changesClock, { dirty: true, limit: 100 });
+      console.log('📊 Recent changes received:', changes);
+      
+      // Update the clock for next fetch
+      setChangesClock(changes.clock);
+      
+      // Format the changes data as JSON string
+      const formattedData = JSON.stringify(changes, null, 2);
+      setChangesData(formattedData);
+      
+      console.log('📊 Recent changes data updated');
+    } catch (error) {
+      console.error('Error fetching recent changes:', error);
+      setChangesData(`Error fetching recent changes: ${(error as Error).message}`);
+    }
+  };
+
+  const fetchChangesSince = async () => {
+    try {
+      // Prompt user for CID value
+      const cidInput = prompt(
+        'Enter the CID (Content Identifier) to fetch changes since:\n\n' +
+        '(Just enter the CID string, e.g., "bafyreieijplscc76xo7226oifrnvewfzk476au2ds5pxzkveokthflj6ci")\n\n' +
+        'CID:'
+      );
+      
+      if (cidInput === null) {
+        console.log('📊 Fetch changes since cancelled by user');
+        return;
+      }
+      
+      if (!cidInput.trim()) {
+        setChangesData('Error: CID cannot be empty. Please enter a valid CID string.');
+        return;
+      }
+      
+      // Wrap the CID in the proper clock format
+      const parsedClock: ClockHead = [{ "/": cidInput.trim() }] as any;
+      console.log('📊 Parsed clock input:', parsedClock);
+      
+      console.log('📊 Fetching changes since clock:', parsedClock);
+      
+      const changes = await database.changes(parsedClock);
+      console.log('📊 Changes since clock received:', changes);
+      
+      // Update the clock for next fetch
+      setChangesClock(changes.clock);
+      
+      // Format the changes data as JSON string
+      const formattedData = JSON.stringify(changes, null, 2);
+      setChangesData(formattedData);
+      
+      console.log('📊 Changes since clock data updated');
+    } catch (error) {
+      console.error('Error fetching changes since clock:', error);
+      setChangesData(`Error fetching changes since clock: ${(error as Error).message}`);
+    }
+  };
+
 
   // Type definitions for key export/import
   interface KeyExportData {
@@ -687,6 +781,92 @@ function App() {
               Import Keys
             </button>
           </div>
+        </div>
+
+        {/* Database Changes Section */}
+        <div style={{ marginBottom: '20px', padding: '20px', backgroundColor: '#f0f8ff', borderRadius: '8px' }}>
+          <h3>📊 Database Changes API</h3>
+          <p style={{ fontSize: '14px', color: '#666', marginBottom: '15px' }}>
+            Use these buttons to inspect the changes feed from your Fireproof database:
+            <br />• <strong>Fetch All Changes:</strong> Gets all changes from the beginning (resets clock)
+            <br />• <strong>Fetch Recent Changes:</strong> Gets only changes since the last fetch (uses stored clock)
+            <br />• <strong>Fetch Changes Since:</strong> Gets changes since a specific CID (just enter the CID string)
+          </p>
+          
+          <div style={{ marginBottom: '15px' }}>
+            <div style={{ marginBottom: '10px' }}>
+              <button
+                onClick={fetchAllChanges}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  backgroundColor: '#6f42c1',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  marginRight: '10px'
+                }}
+              >
+                Fetch All Changes
+              </button>
+              <button
+                onClick={fetchRecentChanges}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  backgroundColor: '#17a2b8',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  marginRight: '10px'
+                }}
+              >
+                Fetch Recent Changes
+              </button>
+              <button
+                onClick={fetchChangesSince}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '14px',
+                  backgroundColor: '#fd7e14',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  marginRight: '10px'
+                }}
+              >
+                Fetch Changes Since...
+              </button>
+            </div>
+            <div style={{ fontSize: '12px', color: '#666' }}>
+              <strong>Current clock:</strong> {changesClock ? JSON.stringify(changesClock) : 'undefined (no previous fetch)'}
+            </div>
+          </div>
+
+          {changesData && (
+            <div style={{ marginTop: '15px' }}>
+              <h4>Changes Data:</h4>
+              <div
+                style={{
+                  height: '500px',
+                  overflow: 'auto',
+                  backgroundColor: '#f8f9fa',
+                  border: '1px solid #dee2e6',
+                  borderRadius: '4px',
+                  padding: '10px',
+                  fontFamily: 'monospace',
+                  fontSize: '12px',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word'
+                }}
+              >
+                {changesData}
+              </div>
+            </div>
+          )}
         </div>
 
         <div style={{ marginBottom: '20px' }}>
