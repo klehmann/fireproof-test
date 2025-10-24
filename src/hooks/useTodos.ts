@@ -1,5 +1,3 @@
-import { useState } from 'react';
-
 export interface Todo {
   _id?: string;
   text: string;
@@ -52,9 +50,26 @@ export const useTodos = (database: any) => {
     }
   };
 
+  const handleEditTodo = async (todo: any, newText: string) => {
+    if (!todo._id || !newText.trim()) return;
+
+    const updatedTodo = {
+      ...todo,
+      text: newText.trim(),
+      updatedAt: Date.now()
+    };
+
+    try {
+      await database.put(updatedTodo);
+    } catch (error) {
+      console.error('Error editing todo:', error);
+    }
+  };
+
   return {
     handleAddTodo,
     handleToggleTodo,
-    handleDeleteTodo
+    handleDeleteTodo,
+    handleEditTodo
   };
 };

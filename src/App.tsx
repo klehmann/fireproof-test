@@ -15,7 +15,13 @@ import { DatabaseChangesSection } from './components/DatabaseChangesSection';
 // Hooks
 import { useTodos } from './hooks/useTodos';
 
-function App() {
+interface AppProps {
+  useCloud?: boolean;
+}
+
+// TODO: check out https://github.com/jchris/testapp/blob/main/src/App.tsx sample app
+
+function App({ useCloud = true }: AppProps) {
   URI.protocolHasHostpart("http");
   registerStoreProtocol({
     protocol: "http",
@@ -28,15 +34,30 @@ function App() {
   });
   
   const { database, useLiveQuery, useAllDocs } = useFireproof("fireproof-todo-app", {
-    attach: toCloud({
+    attach: useCloud ? toCloud({
       dashboardURI: "http://localhost:3001/fp/cloud/api/token",
       tokenApiURI: "http://localhost:3001/api",
       urls: { base: "http://localhost:3001?protocol=http&forceHttp=true" },
-    }),
+    }) : undefined,
   });
+
+  // Handle mode switching with proper cleanup
+  useEffect(() => {
+    return () => {
+      // Cleanup function - close and destroy database when component unmounts or useCloud changes
+      console.log('🧹 Closing and destroying database connection...');
+      database.close().then(() => {
+        console.log('✅ Database closed successfully');
+      }).catch((err) => {
+        console.error('❌ Error closing/destroying database:', err);
+      });
+    };
+  }, [useCloud]); // Re-run when useCloud changes
 
   // Log database initialization
   console.log('🗄️ Database initialized:', database);
+  console.log('🗄️ useCloud:', useCloud);
+  console.log('🗄️ Database attach:', database.attach);
   console.log('🗄️ Database ledger:', database.ledger);
   console.log('🗄️ Using shared database name: fireproof-todo-app');
   
@@ -51,14 +72,15 @@ function App() {
   const todos = result.docs
 
   // Use custom hook for todo operations
-  const { handleAddTodo, handleToggleTodo, handleDeleteTodo } = useTodos(database);
+  const { handleAddTodo, handleToggleTodo, handleDeleteTodo, handleEditTodo } = useTodos(database);
 
   useEffect(() => {
     console.log('🔌 Database connection effect triggered');
     console.log('🔌 Database:', database);
     console.log('🔌 Database ledger:', database?.ledger);
+    console.log('🔌 useCloud mode:', useCloud);
     console.log('✅ Connected to local Hono server');
-  }, [database]);
+  }, [database, useCloud]);
 
   
   return (
@@ -78,7 +100,8 @@ function App() {
           <TodoList 
             todos={todos as any[]} 
             onToggleTodo={handleToggleTodo} 
-            onDeleteTodo={handleDeleteTodo} 
+            onDeleteTodo={handleDeleteTodo}
+            onEditTodo={handleEditTodo}
           />
         </div>
 
